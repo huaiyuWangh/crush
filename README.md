@@ -1,7 +1,7 @@
 # Crush
 
 <p align="center">
-    <a href="https://stuff.charm.sh/crush/charm-crush.png"><img width="450" alt="Charm Crush Logo" src="https://github.com/user-attachments/assets/adc1a6f4-b284-4603-836c-59038caa2e8b" /></a><br />
+    <a href="https://stuff.charm.sh/crush/charm-crush.png"><img width="450" alt="Charm Crush Logo" src="https://github.com/user-attachments/assets/cf8ca3ce-8b02-43f0-9d0f-5a331488da4b" /></a><br />
     <a href="https://github.com/charmbracelet/crush/releases"><img src="https://img.shields.io/github/release/charmbracelet/crush" alt="Latest Release"></a>
     <a href="https://github.com/charmbracelet/crush/actions"><img src="https://github.com/charmbracelet/crush/actions/workflows/build.yml/badge.svg" alt="Build Status"></a>
 </p>
@@ -18,7 +18,8 @@
 - **Session-Based:** maintain multiple work sessions and contexts per project
 - **LSP-Enhanced:** Crush uses LSPs for additional context, just like you do
 - **Extensible:** add capabilities via MCPs (`http`, `stdio`, and `sse`)
-- **Works Everywhere:** first-class support in every terminal on macOS, Linux, Windows (PowerShell and WSL), FreeBSD, OpenBSD, and NetBSD
+- **Works Everywhere:** first-class support in every terminal on macOS, Linux, Windows (PowerShell and WSL), Android, FreeBSD, OpenBSD, and NetBSD
+- **Industrial Grade:** built on the Charm ecosystem, powering 25k+ applications, from leading open source projects to business-critical infrastructure
 
 ## Installation
 
@@ -55,7 +56,7 @@ scoop install crush
 <details>
 <summary><strong>Nix (NUR)</strong></summary>
 
-Crush is available via the offical Charm [NUR](https://github.com/nix-community/NUR) in `nur.repos.charmbracelet.crush`, which is the most up-to-date way to get Crush in Nix.
+Crush is available via the official Charm [NUR](https://github.com/nix-community/NUR) in `nur.repos.charmbracelet.crush`, which is the most up-to-date way to get Crush in Nix.
 
 You can also try out Crush via the NUR with `nix-shell`:
 
@@ -173,7 +174,7 @@ go install github.com/charmbracelet/crush@latest
 ## Getting Started
 
 The quickest way to get started is to grab an API key for your preferred
-provider such as Anthropic, OpenAI, Groq, or OpenRouter and just start
+provider such as Anthropic, OpenAI, Groq, OpenRouter, or Vercel AI Gateway and just start
 Crush. You'll be prompted to enter your API key.
 
 That said, you can also set environment variables for preferred providers.
@@ -182,18 +183,21 @@ That said, you can also set environment variables for preferred providers.
 | --------------------------- | -------------------------------------------------- |
 | `ANTHROPIC_API_KEY`         | Anthropic                                          |
 | `OPENAI_API_KEY`            | OpenAI                                             |
-| `OPENROUTER_API_KEY`        | OpenRouter                                         |
+| `VERCEL_API_KEY`            | Vercel AI Gateway                                  |
 | `GEMINI_API_KEY`            | Google Gemini                                      |
+| `SYNTHETIC_API_KEY`         | Synthetic                                          |
+| `ZAI_API_KEY`               | Z.ai                                               |
+| `HF_TOKEN`                  | Hugging Face Inference                             |
 | `CEREBRAS_API_KEY`          | Cerebras                                           |
-| `HF_TOKEN`                  | Huggingface Inference                              |
+| `OPENROUTER_API_KEY`        | OpenRouter                                         |
+| `GROQ_API_KEY`              | Groq                                               |
 | `VERTEXAI_PROJECT`          | Google Cloud VertexAI (Gemini)                     |
 | `VERTEXAI_LOCATION`         | Google Cloud VertexAI (Gemini)                     |
-| `GROQ_API_KEY`              | Groq                                               |
-| `AWS_ACCESS_KEY_ID`         | Amazon Bedrock (Claude)                               |
-| `AWS_SECRET_ACCESS_KEY`     | Amazon Bedrock (Claude)                               |
-| `AWS_REGION`                | Amazon Bedrock (Claude)                               |
-| `AWS_PROFILE`               | Amazon Bedrock (Custom Profile)                       |
-| `AWS_BEARER_TOKEN_BEDROCK`  | Amazon Bedrock                                        |
+| `AWS_ACCESS_KEY_ID`         | Amazon Bedrock (Claude)                            |
+| `AWS_SECRET_ACCESS_KEY`     | Amazon Bedrock (Claude)                            |
+| `AWS_REGION`                | Amazon Bedrock (Claude)                            |
+| `AWS_PROFILE`               | Amazon Bedrock (Custom Profile)                    |
+| `AWS_BEARER_TOKEN_BEDROCK`  | Amazon Bedrock                                     |
 | `AZURE_OPENAI_API_ENDPOINT` | Azure OpenAI models                                |
 | `AZURE_OPENAI_API_KEY`      | Azure OpenAI models (optional when using Entra ID) |
 | `AZURE_OPENAI_API_VERSION`  | Azure OpenAI models                                |
@@ -734,8 +738,8 @@ Or by setting the following in your config:
 }
 ```
 
-Crush also respects the [`DO_NOT_TRACK`](https://consoledonottrack.com)
-convention which can be enabled via `export DO_NOT_TRACK=1`.
+Crush also respects the `DO_NOT_TRACK` convention which can be enabled via
+`export DO_NOT_TRACK=1`.
 
 ## Contributing
 

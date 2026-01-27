@@ -117,6 +117,11 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		return nil, err
 	}
 
+	// refresh models before each run
+	if err := c.UpdateModels(ctx); err != nil {
+		return nil, fmt.Errorf("failed to update models: %w", err)
+	}
+
 	model := c.currentAgent.Model()
 	maxTokens := model.CatwalkCfg.DefaultMaxTokens
 	if model.ModelCfg.MaxTokens != 0 {
@@ -322,17 +327,12 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		return nil, err
 	}
 
-	systemPrompt, err := prompt.Build(ctx, large.Model.Provider(), large.Model.Model(), *c.cfg)
-	if err != nil {
-		return nil, err
-	}
-
 	largeProviderCfg, _ := c.cfg.Providers.Get(large.ModelCfg.Provider)
 	result := NewSessionAgent(SessionAgentOptions{
 		large,
 		small,
 		largeProviderCfg.SystemPromptPrefix,
-		systemPrompt,
+		"",
 		isSubAgent,
 		c.cfg.Options.DisableAutoSummarize,
 		c.permissions.SkipRequests(),
@@ -340,6 +340,16 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		c.messages,
 		nil,
 	})
+
+	c.readyWg.Go(func() error {
+		systemPrompt, err := prompt.Build(ctx, large.Model.Provider(), large.Model.Model(), *c.cfg)
+		if err != nil {
+			return err
+		}
+		result.SetSystemPrompt(systemPrompt)
+		return nil
+	})
+
 	c.readyWg.Go(func() error {
 		tools, err := c.buildTools(ctx, agent)
 		if err != nil {
@@ -396,7 +406,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent) ([]fan
 	)
 
 	if len(c.cfg.LSP) > 0 {
-		allTools = append(allTools, tools.NewDiagnosticsTool(c.lspClients), tools.NewReferencesTool(c.lspClients))
+		allTools = append(allTools, tools.NewDiagnosticsTool(c.lspClients), tools.NewReferencesTool(c.lspClients), tools.NewLSPRestartTool(c.lspClients))
 	}
 
 	var filteredTools []fantasy.AgentTool
@@ -484,7 +494,7 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 	}
 
 	if smallCatwalkModel == nil {
-		return Model{}, Model{}, errors.New("snall model not found in provider config")
+		return Model{}, Model{}, errors.New("small model not found in provider config")
 	}
 
 	largeModelID := largeModelCfg.Model

@@ -53,6 +53,11 @@ var defaultContextPaths = []string{
 
 type SelectedModelType string
 
+// String returns the string representation of the [SelectedModelType].
+func (s SelectedModelType) String() string {
+	return string(s)
+}
+
 const (
 	SelectedModelTypeLarge SelectedModelType = "large"
 	SelectedModelTypeSmall SelectedModelType = "small"
@@ -182,7 +187,7 @@ type MCPConfig struct {
 
 type LSPConfig struct {
 	Disabled    bool              `json:"disabled,omitempty" jsonschema:"description=Whether this LSP server is disabled,default=false"`
-	Command     string            `json:"command,omitempty" jsonschema:"required,description=Command to execute for the LSP server,example=gopls"`
+	Command     string            `json:"command,omitempty" jsonschema:"description=Command to execute for the LSP server,example=gopls"`
 	Args        []string          `json:"args,omitempty" jsonschema:"description=Arguments to pass to the LSP server command"`
 	Env         map[string]string `json:"env,omitempty" jsonschema:"description=Environment variables to set to the LSP server command"`
 	FileTypes   []string          `json:"filetypes,omitempty" jsonschema:"description=File types this LSP server handles,example=go,example=mod,example=rs,example=c,example=js,example=ts"`
@@ -248,6 +253,7 @@ type Options struct {
 	DataDirectory             string       `json:"data_directory,omitempty" jsonschema:"description=Directory for storing application data (relative to working directory),default=.crush,example=.crush"` // Relative to the cwd
 	DisabledTools             []string     `json:"disabled_tools,omitempty" jsonschema:"description=List of built-in tools to disable and hide from the agent,example=bash,example=sourcegraph"`
 	DisableProviderAutoUpdate bool         `json:"disable_provider_auto_update,omitempty" jsonschema:"description=Disable providers auto-update,default=false"`
+	DisableDefaultProviders   bool         `json:"disable_default_providers,omitempty" jsonschema:"description=Ignore all default/embedded providers. When enabled, providers must be fully specified in the config file with base_url, models, and api_key - no merging with defaults occurs,default=false"`
 	Attribution               *Attribution `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
 	DisableMetrics            bool         `json:"disable_metrics,omitempty" jsonschema:"description=Disable sending metrics,default=false"`
 	InitializeAs              string       `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
@@ -340,7 +346,7 @@ type Agent struct {
 }
 
 type Tools struct {
-	Ls ToolLs `json:"ls,omitzero"`
+	Ls ToolLs `json:"ls,omitempty"`
 }
 
 type ToolLs struct {
@@ -358,8 +364,9 @@ type Config struct {
 
 	// We currently only support large/small as values here.
 	Models map[SelectedModelType]SelectedModel `json:"models,omitempty" jsonschema:"description=Model configurations for different model types,example={\"large\":{\"model\":\"gpt-4o\",\"provider\":\"openai\"}}"`
+
 	// Recently used models stored in the data directory config.
-	RecentModels map[SelectedModelType][]SelectedModel `json:"recent_models,omitempty" jsonschema:"description=Recently used models sorted by most recent first"`
+	RecentModels map[SelectedModelType][]SelectedModel `json:"recent_models,omitempty" jsonschema:"-"`
 
 	// The providers that are configured
 	Providers *csync.Map[string, ProviderConfig] `json:"providers,omitempty" jsonschema:"description=AI provider configurations"`
@@ -372,7 +379,7 @@ type Config struct {
 
 	Permissions *Permissions `json:"permissions,omitempty" jsonschema:"description=Permission settings for tool usage"`
 
-	Tools Tools `json:"tools,omitzero" jsonschema:"description=Tool configurations"`
+	Tools Tools `json:"tools,omitempty" jsonschema:"description=Tool configurations"`
 
 	Agents map[string]Agent `json:"-"`
 
@@ -689,6 +696,7 @@ func allToolNames() []string {
 		"multiedit",
 		"lsp_diagnostics",
 		"lsp_references",
+		"lsp_restart",
 		"fetch",
 		"agentic_fetch",
 		"glob",
@@ -806,21 +814,21 @@ func (c *ProviderConfig) TestConnection(resolver VariableResolver) error {
 	for k, v := range c.ExtraHeaders {
 		req.Header.Set(k, v)
 	}
-	b, err := client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to create request for provider %s: %w", c.ID, err)
 	}
+	defer resp.Body.Close()
 	if c.ID == string(catwalk.InferenceProviderZAI) {
-		if b.StatusCode == http.StatusUnauthorized {
-			// for z.ai just check if the http response is not 401
-			return fmt.Errorf("failed to connect to provider %s: %s", c.ID, b.Status)
+		if resp.StatusCode == http.StatusUnauthorized {
+			// For z.ai just check if the http response is not 401.
+			return fmt.Errorf("failed to connect to provider %s: %s", c.ID, resp.Status)
 		}
 	} else {
-		if b.StatusCode != http.StatusOK {
-			return fmt.Errorf("failed to connect to provider %s: %s", c.ID, b.Status)
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("failed to connect to provider %s: %s", c.ID, resp.Status)
 		}
 	}
-	_ = b.Body.Close()
 	return nil
 }
 

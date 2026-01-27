@@ -22,6 +22,8 @@ import (
 	"github.com/charmbracelet/crush/internal/projects"
 	"github.com/charmbracelet/crush/internal/stringext"
 	"github.com/charmbracelet/crush/internal/tui"
+	"github.com/charmbracelet/crush/internal/ui/common"
+	ui "github.com/charmbracelet/crush/internal/ui/model"
 	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/fang"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -30,6 +32,9 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 )
+
+// kittyTerminals defines terminals supporting querying capabilities.
+var kittyTerminals = []string{"alacritty", "ghostty", "kitty", "rio", "wezterm"}
 
 func init() {
 	rootCmd.PersistentFlags().StringP("cwd", "c", "", "Current working directory")
@@ -86,11 +91,21 @@ crush -y
 
 		// Set up the TUI.
 		var env uv.Environ = os.Environ()
-		ui := tui.New(app)
-		ui.QueryVersion = shouldQueryTerminalVersion(env)
 
+		var model tea.Model
+		if v, _ := strconv.ParseBool(env.Getenv("CRUSH_NEW_UI")); v {
+			slog.Info("New UI in control!")
+			com := common.DefaultCommon(app)
+			ui := ui.New(com)
+			ui.QueryCapabilities = shouldQueryCapabilities(env)
+			model = ui
+		} else {
+			ui := tui.New(app)
+			ui.QueryVersion = shouldQueryCapabilities(env)
+			model = ui
+		}
 		program := tea.NewProgram(
-			ui,
+			model,
 			tea.WithEnvironment(env),
 			tea.WithContext(cmd.Context()),
 			tea.WithFilter(tui.MouseEventFilter)) // Filter mouse events based on focus state
@@ -287,12 +302,16 @@ func createDotCrushDir(dir string) error {
 	return nil
 }
 
-func shouldQueryTerminalVersion(env uv.Environ) bool {
+func shouldQueryCapabilities(env uv.Environ) bool {
+	const osVendorTypeApple = "Apple"
 	termType := env.Getenv("TERM")
 	termProg, okTermProg := env.LookupEnv("TERM_PROGRAM")
 	_, okSSHTTY := env.LookupEnv("SSH_TTY")
+	if okTermProg && strings.Contains(termProg, osVendorTypeApple) {
+		return false
+	}
 	return (!okTermProg && !okSSHTTY) ||
-		(!strings.Contains(termProg, "Apple") && !okSSHTTY) ||
+		(!strings.Contains(termProg, osVendorTypeApple) && !okSSHTTY) ||
 		// Terminals that do support XTVERSION.
-		stringext.ContainsAny(termType, "alacritty", "ghostty", "kitty", "rio", "wezterm")
+		stringext.ContainsAny(termType, kittyTerminals...)
 }

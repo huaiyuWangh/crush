@@ -7,7 +7,6 @@ import (
 	_ "embed"
 	"fmt"
 	"html/template"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,6 +14,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/shell"
 )
@@ -215,7 +215,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for executing shell command")
 			}
 			if !isSafeReadOnly {
-				p := permissions.Request(
+				p, err := permissions.Request(ctx,
 					permission.CreatePermissionRequest{
 						SessionID:   sessionID,
 						Path:        execWorkingDir,
@@ -226,6 +226,9 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 						Params:      BashPermissionsParams(params),
 					},
 				)
+				if err != nil {
+					return fantasy.ToolResponse{}, err
+				}
 				if !p {
 					return fantasy.ToolResponse{}, permission.ErrorPermissionDenied
 				}
@@ -428,12 +431,7 @@ func countLines(s string) int {
 
 func normalizeWorkingDir(path string) string {
 	if runtime.GOOS == "windows" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			cwd = "C:"
-		}
-		path = strings.ReplaceAll(path, filepath.VolumeName(cwd), "")
+		path = strings.ReplaceAll(path, fsext.WindowsWorkingDirDrive(), "")
 	}
-
 	return filepath.ToSlash(path)
 }

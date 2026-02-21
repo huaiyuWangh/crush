@@ -28,6 +28,16 @@ type Todo struct {
 	ActiveForm string     `json:"active_form"`
 }
 
+// HasIncompleteTodos returns true if there are any non-completed todos.
+func HasIncompleteTodos(todos []Todo) bool {
+	for _, todo := range todos {
+		if todo.Status != TodoStatusCompleted {
+			return true
+		}
+	}
+	return false
+}
+
 type Session struct {
 	ID               string
 	ParentSessionID  string
@@ -61,7 +71,8 @@ type Service interface {
 
 type service struct {
 	*pubsub.Broker[Session]
-	q db.Querier
+	db *sql.DB
+	q  *db.Queries
 }
 
 func (s *service) Create(ctx context.Context, title string) (Session, error) {
@@ -107,14 +118,32 @@ func (s *service) CreateTitleSession(ctx context.Context, parentSessionID string
 }
 
 func (s *service) Delete(ctx context.Context, id string) error {
-	session, err := s.Get(ctx, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	qtx := s.q.WithTx(tx)
+
+	dbSession, err := qtx.GetSessionByID(ctx, id)
 	if err != nil {
 		return err
 	}
-	err = s.q.DeleteSession(ctx, session.ID)
-	if err != nil {
-		return err
+	if err = qtx.DeleteSessionMessages(ctx, dbSession.ID); err != nil {
+		return fmt.Errorf("deleting session messages: %w", err)
 	}
+	if err = qtx.DeleteSessionFiles(ctx, dbSession.ID); err != nil {
+		return fmt.Errorf("deleting session files: %w", err)
+	}
+	if err = qtx.DeleteSession(ctx, dbSession.ID); err != nil {
+		return fmt.Errorf("deleting session: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	session := s.fromDBItem(dbSession)
 	s.Publish(pubsub.DeletedEvent, session)
 	event.SessionDeleted()
 	return nil
@@ -184,7 +213,7 @@ func (s *service) List(ctx context.Context) ([]Session, error) {
 func (s service) fromDBItem(item db.Session) Session {
 	todos, err := unmarshalTodos(item.Todos.String)
 	if err != nil {
-		slog.Error("failed to unmarshal todos", "session_id", item.ID, "error", err)
+		slog.Error("Failed to unmarshal todos", "session_id", item.ID, "error", err)
 	}
 	return Session{
 		ID:               item.ID,
@@ -223,11 +252,12 @@ func unmarshalTodos(data string) ([]Todo, error) {
 	return todos, nil
 }
 
-func NewService(q db.Querier) Service {
+func NewService(q *db.Queries, conn *sql.DB) Service {
 	broker := pubsub.NewBroker[Session]()
 	return &service{
-		broker,
-		q,
+		Broker: broker,
+		db:     conn,
+		q:      q,
 	}
 }
 

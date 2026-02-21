@@ -15,13 +15,13 @@ import (
 	"slices"
 	"strings"
 
+	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
-	"github.com/charmbracelet/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
@@ -38,6 +38,7 @@ import (
 	"charm.land/fantasy/providers/openai"
 	"charm.land/fantasy/providers/openaicompat"
 	"charm.land/fantasy/providers/openrouter"
+	"charm.land/fantasy/providers/vercel"
 	openaisdk "github.com/openai/openai-go/v2/option"
 	"github.com/qjebbs/go-jsons"
 )
@@ -64,7 +65,8 @@ type coordinator struct {
 	messages    message.Service
 	permissions permission.Service
 	history     history.Service
-	lspClients  *csync.Map[string, *lsp.Client]
+	filetracker filetracker.Service
+	lspManager  *lsp.Manager
 
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
@@ -79,7 +81,8 @@ func NewCoordinator(
 	messages message.Service,
 	permissions permission.Service,
 	history history.Service,
-	lspClients *csync.Map[string, *lsp.Client],
+	filetracker filetracker.Service,
+	lspManager *lsp.Manager,
 ) (Coordinator, error) {
 	c := &coordinator{
 		cfg:         cfg,
@@ -87,7 +90,8 @@ func NewCoordinator(
 		messages:    messages,
 		permissions: permissions,
 		history:     history,
-		lspClients:  lspClients,
+		filetracker: filetracker,
+		lspManager:  lspManager,
 		agents:      make(map[string]SessionAgent),
 	}
 
@@ -117,6 +121,11 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		return nil, err
 	}
 
+	// refresh models before each run
+	if err := c.UpdateModels(ctx); err != nil {
+		return nil, fmt.Errorf("failed to update models: %w", err)
+	}
+
 	model := c.currentAgent.Model()
 	maxTokens := model.CatwalkCfg.DefaultMaxTokens
 	if model.ModelCfg.MaxTokens != 0 {
@@ -142,7 +151,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	mergedOptions, temp, topP, topK, freqPenalty, presPenalty := mergeCallOptions(model, providerCfg)
 
 	if providerCfg.OAuthToken != nil && providerCfg.OAuthToken.IsExpired() {
-		slog.Info("Token needs to be refreshed", "provider", providerCfg.ID)
+		slog.Debug("Token needs to be refreshed", "provider", providerCfg.ID)
 		if err := c.refreshOAuth2Token(ctx, providerCfg); err != nil {
 			return nil, err
 		}
@@ -167,18 +176,18 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	if c.isUnauthorized(originalErr) {
 		switch {
 		case providerCfg.OAuthToken != nil:
-			slog.Info("Received 401. Refreshing token and retrying", "provider", providerCfg.ID)
+			slog.Debug("Received 401. Refreshing token and retrying", "provider", providerCfg.ID)
 			if err := c.refreshOAuth2Token(ctx, providerCfg); err != nil {
 				return nil, originalErr
 			}
-			slog.Info("Retrying request with refreshed OAuth token", "provider", providerCfg.ID)
+			slog.Debug("Retrying request with refreshed OAuth token", "provider", providerCfg.ID)
 			return run()
 		case strings.Contains(providerCfg.APIKeyTemplate, "$"):
-			slog.Info("Received 401. Refreshing API Key template and retrying", "provider", providerCfg.ID)
+			slog.Debug("Received 401. Refreshing API Key template and retrying", "provider", providerCfg.ID)
 			if err := c.refreshApiKeyTemplate(ctx, providerCfg); err != nil {
 				return nil, originalErr
 			}
-			slog.Info("Retrying request with refreshed API key", "provider", providerCfg.ID)
+			slog.Debug("Retrying request with refreshed API key", "provider", providerCfg.ID)
 			return run()
 		}
 	}
@@ -234,7 +243,20 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		return options
 	}
 
-	switch providerCfg.Type {
+	providerType := providerCfg.Type
+	if providerType == "hyper" {
+		if strings.Contains(model.CatwalkCfg.ID, "claude") {
+			providerType = anthropic.Name
+		} else if strings.Contains(model.CatwalkCfg.ID, "gpt") {
+			providerType = openai.Name
+		} else if strings.Contains(model.CatwalkCfg.ID, "gemini") {
+			providerType = google.Name
+		} else {
+			providerType = openaicompat.Name
+		}
+	}
+
+	switch providerType {
 	case openai.Name, azure.Name:
 		_, hasReasoningEffort := mergedOptions["reasoning_effort"]
 		if !hasReasoningEffort && model.ModelCfg.ReasoningEffort != "" {
@@ -280,6 +302,18 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		if err == nil {
 			options[openrouter.Name] = parsed
 		}
+	case vercel.Name:
+		_, hasReasoning := mergedOptions["reasoning"]
+		if !hasReasoning && model.ModelCfg.ReasoningEffort != "" {
+			mergedOptions["reasoning"] = map[string]any{
+				"enabled": true,
+				"effort":  model.ModelCfg.ReasoningEffort,
+			}
+		}
+		parsed, err := vercel.ParseOptions(mergedOptions)
+		if err == nil {
+			options[vercel.Name] = parsed
+		}
 	case google.Name:
 		_, hasReasoning := mergedOptions["thinking_config"]
 		if !hasReasoning {
@@ -322,17 +356,12 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		return nil, err
 	}
 
-	systemPrompt, err := prompt.Build(ctx, large.Model.Provider(), large.Model.Model(), *c.cfg)
-	if err != nil {
-		return nil, err
-	}
-
 	largeProviderCfg, _ := c.cfg.Providers.Get(large.ModelCfg.Provider)
 	result := NewSessionAgent(SessionAgentOptions{
 		large,
 		small,
 		largeProviderCfg.SystemPromptPrefix,
-		systemPrompt,
+		"",
 		isSubAgent,
 		c.cfg.Options.DisableAutoSummarize,
 		c.permissions.SkipRequests(),
@@ -340,6 +369,16 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		c.messages,
 		nil,
 	})
+
+	c.readyWg.Go(func() error {
+		systemPrompt, err := prompt.Build(ctx, large.Model.Provider(), large.Model.Model(), *c.cfg)
+		if err != nil {
+			return err
+		}
+		result.SetSystemPrompt(systemPrompt)
+		return nil
+	})
+
 	c.readyWg.Go(func() error {
 		tools, err := c.buildTools(ctx, agent)
 		if err != nil {
@@ -383,20 +422,29 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent) ([]fan
 		tools.NewJobOutputTool(),
 		tools.NewJobKillTool(),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
-		tools.NewEditTool(c.lspClients, c.permissions, c.history, c.cfg.WorkingDir()),
-		tools.NewMultiEditTool(c.lspClients, c.permissions, c.history, c.cfg.WorkingDir()),
+		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
+		tools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewFetchTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewGlobTool(c.cfg.WorkingDir()),
-		tools.NewGrepTool(c.cfg.WorkingDir()),
+		tools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Tools.Grep),
 		tools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Tools.Ls),
 		tools.NewSourcegraphTool(nil),
 		tools.NewTodosTool(c.sessions),
-		tools.NewViewTool(c.lspClients, c.permissions, c.cfg.WorkingDir(), c.cfg.Options.SkillsPaths...),
-		tools.NewWriteTool(c.lspClients, c.permissions, c.history, c.cfg.WorkingDir()),
+		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Options.SkillsPaths...),
+		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	)
 
-	if len(c.cfg.LSP) > 0 {
-		allTools = append(allTools, tools.NewDiagnosticsTool(c.lspClients), tools.NewReferencesTool(c.lspClients))
+	// Add LSP tools if user has configured LSPs or auto_lsp is enabled (nil or true).
+	if len(c.cfg.LSP) > 0 || c.cfg.Options.AutoLSP == nil || *c.cfg.Options.AutoLSP {
+		allTools = append(allTools, tools.NewDiagnosticsTool(c.lspManager), tools.NewReferencesTool(c.lspManager), tools.NewLSPRestartTool(c.lspManager))
+	}
+
+	if len(c.cfg.MCP) > 0 {
+		allTools = append(
+			allTools,
+			tools.NewListMCPResourcesTool(c.cfg, c.permissions),
+			tools.NewReadMCPResourceTool(c.cfg, c.permissions),
+		)
 	}
 
 	var filteredTools []fantasy.AgentTool
@@ -406,7 +454,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent) ([]fan
 		}
 	}
 
-	for _, tool := range tools.GetMCPTools(c.permissions, c.cfg.WorkingDir()) {
+	for _, tool := range tools.GetMCPTools(c.permissions, c.cfg, c.cfg.WorkingDir()) {
 		if agent.AllowedMCP == nil {
 			// No MCP restrictions
 			filteredTools = append(filteredTools, tool)
@@ -414,7 +462,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent) ([]fan
 		}
 		if len(agent.AllowedMCP) == 0 {
 			// No MCPs allowed
-			slog.Debug("no MCPs allowed", "tool", tool.Name(), "agent", agent.Name)
+			slog.Debug("No MCPs allowed", "tool", tool.Name(), "agent", agent.Name)
 			break
 		}
 
@@ -424,9 +472,10 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent) ([]fan
 			}
 			if len(tools) == 0 || slices.Contains(tools, tool.MCPToolName()) {
 				filteredTools = append(filteredTools, tool)
+				break
 			}
+			slog.Debug("MCP not allowed", "tool", tool.Name(), "agent", agent.Name)
 		}
-		slog.Debug("MCP not allowed", "tool", tool.Name(), "agent", agent.Name)
 	}
 	slices.SortFunc(filteredTools, func(a, b fantasy.AgentTool) int {
 		return strings.Compare(a.Info().Name, b.Info().Name)
@@ -457,10 +506,10 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 
 	smallProviderCfg, ok := c.cfg.Providers.Get(smallModelCfg.Provider)
 	if !ok {
-		return Model{}, Model{}, errors.New("large model provider not configured")
+		return Model{}, Model{}, errors.New("small model provider not configured")
 	}
 
-	smallProvider, err := c.buildProvider(smallProviderCfg, largeModelCfg, true)
+	smallProvider, err := c.buildProvider(smallProviderCfg, smallModelCfg, true)
 	if err != nil {
 		return Model{}, Model{}, err
 	}
@@ -484,7 +533,7 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 	}
 
 	if smallCatwalkModel == nil {
-		return Model{}, Model{}, errors.New("snall model not found in provider config")
+		return Model{}, Model{}, errors.New("small model not found in provider config")
 	}
 
 	largeModelID := largeModelCfg.Model
@@ -518,14 +567,19 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		}, nil
 }
 
-func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string) (fantasy.Provider, error) {
+func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
 	var opts []anthropic.Option
 
-	if strings.HasPrefix(apiKey, "Bearer ") {
+	switch {
+	case strings.HasPrefix(apiKey, "Bearer "):
 		// NOTE: Prevent the SDK from picking up the API key from env.
 		os.Setenv("ANTHROPIC_API_KEY", "")
 		headers["Authorization"] = apiKey
-	} else if apiKey != "" {
+	case providerID == string(catwalk.InferenceProviderMiniMax):
+		// NOTE: Prevent the SDK from picking up the API key from env.
+		os.Setenv("ANTHROPIC_API_KEY", "")
+		headers["Authorization"] = "Bearer " + apiKey
+	case apiKey != "":
 		// X-Api-Key header
 		opts = append(opts, anthropic.WithAPIKey(apiKey))
 	}
@@ -575,6 +629,20 @@ func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[stri
 		opts = append(opts, openrouter.WithHeaders(headers))
 	}
 	return openrouter.New(opts...)
+}
+
+func (c *coordinator) buildVercelProvider(_, apiKey string, headers map[string]string) (fantasy.Provider, error) {
+	opts := []vercel.Option{
+		vercel.WithAPIKey(apiKey),
+	}
+	if c.cfg.Options.Debug {
+		httpClient := log.NewHTTPClient()
+		opts = append(opts, vercel.WithHTTPClient(httpClient))
+	}
+	if len(headers) > 0 {
+		opts = append(opts, vercel.WithHeaders(headers))
+	}
+	return vercel.New(opts...)
 }
 
 func (c *coordinator) buildOpenaiCompatProvider(baseURL, apiKey string, headers map[string]string, extraBody map[string]any, providerID string, isSubAgent bool) (fantasy.Provider, error) {
@@ -731,9 +799,11 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 	case openai.Name:
 		return c.buildOpenaiProvider(baseURL, apiKey, headers)
 	case anthropic.Name:
-		return c.buildAnthropicProvider(baseURL, apiKey, headers)
+		return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID)
 	case openrouter.Name:
 		return c.buildOpenrouterProvider(baseURL, apiKey, headers)
+	case vercel.Name:
+		return c.buildVercelProvider(baseURL, apiKey, headers)
 	case azure.Name:
 		return c.buildAzureProvider(baseURL, apiKey, headers, providerCfg.ExtraParams)
 	case bedrock.Name:

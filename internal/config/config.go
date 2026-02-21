@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/catwalk/pkg/catwalk"
+	"charm.land/catwalk/pkg/catwalk"
 	hyperp "github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/env"
@@ -52,6 +52,11 @@ var defaultContextPaths = []string{
 }
 
 type SelectedModelType string
+
+// String returns the string representation of the [SelectedModelType].
+func (s SelectedModelType) String() string {
+	return string(s)
+}
 
 const (
 	SelectedModelTypeLarge SelectedModelType = "large"
@@ -182,13 +187,14 @@ type MCPConfig struct {
 
 type LSPConfig struct {
 	Disabled    bool              `json:"disabled,omitempty" jsonschema:"description=Whether this LSP server is disabled,default=false"`
-	Command     string            `json:"command,omitempty" jsonschema:"required,description=Command to execute for the LSP server,example=gopls"`
+	Command     string            `json:"command,omitempty" jsonschema:"description=Command to execute for the LSP server,example=gopls"`
 	Args        []string          `json:"args,omitempty" jsonschema:"description=Arguments to pass to the LSP server command"`
 	Env         map[string]string `json:"env,omitempty" jsonschema:"description=Environment variables to set to the LSP server command"`
 	FileTypes   []string          `json:"filetypes,omitempty" jsonschema:"description=File types this LSP server handles,example=go,example=mod,example=rs,example=c,example=js,example=ts"`
 	RootMarkers []string          `json:"root_markers,omitempty" jsonschema:"description=Files or directories that indicate the project root,example=go.mod,example=package.json,example=Cargo.toml"`
 	InitOptions map[string]any    `json:"init_options,omitempty" jsonschema:"description=Initialization options passed to the LSP server during initialize request"`
 	Options     map[string]any    `json:"options,omitempty" jsonschema:"description=LSP server-specific settings passed during initialization"`
+	Timeout     int               `json:"timeout,omitempty" jsonschema:"description=Timeout in seconds for LSP server initialization,default=30,example=60,example=120"`
 }
 
 type TUIOptions struct {
@@ -198,6 +204,7 @@ type TUIOptions struct {
 	//
 
 	Completions Completions `json:"completions,omitzero" jsonschema:"description=Completions UI options"`
+	Transparent *bool       `json:"transparent,omitempty" jsonschema:"description=Enable transparent background for the TUI interface,default=false"`
 }
 
 // Completions defines options for the completions UI.
@@ -248,9 +255,12 @@ type Options struct {
 	DataDirectory             string       `json:"data_directory,omitempty" jsonschema:"description=Directory for storing application data (relative to working directory),default=.crush,example=.crush"` // Relative to the cwd
 	DisabledTools             []string     `json:"disabled_tools,omitempty" jsonschema:"description=List of built-in tools to disable and hide from the agent,example=bash,example=sourcegraph"`
 	DisableProviderAutoUpdate bool         `json:"disable_provider_auto_update,omitempty" jsonschema:"description=Disable providers auto-update,default=false"`
+	DisableDefaultProviders   bool         `json:"disable_default_providers,omitempty" jsonschema:"description=Ignore all default/embedded providers. When enabled, providers must be fully specified in the config file with base_url, models, and api_key - no merging with defaults occurs,default=false"`
 	Attribution               *Attribution `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
 	DisableMetrics            bool         `json:"disable_metrics,omitempty" jsonschema:"description=Disable sending metrics,default=false"`
 	InitializeAs              string       `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
+	AutoLSP                   *bool        `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
+	Progress                  *bool        `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
 }
 
 type MCPs map[string]MCPConfig
@@ -309,7 +319,7 @@ func (m MCPConfig) ResolvedHeaders() map[string]string {
 		var err error
 		m.Headers[e], err = resolver.ResolveValue(v)
 		if err != nil {
-			slog.Error("error resolving header variable", "error", err, "variable", e, "value", v)
+			slog.Error("Error resolving header variable", "error", err, "variable", e, "value", v)
 			continue
 		}
 	}
@@ -340,7 +350,8 @@ type Agent struct {
 }
 
 type Tools struct {
-	Ls ToolLs `json:"ls,omitzero"`
+	Ls   ToolLs   `json:"ls,omitzero"`
+	Grep ToolGrep `json:"grep,omitzero"`
 }
 
 type ToolLs struct {
@@ -348,8 +359,18 @@ type ToolLs struct {
 	MaxItems *int `json:"max_items,omitempty" jsonschema:"description=Maximum number of items to return for the ls tool,default=1000,example=100"`
 }
 
+// Limits returns the user-defined max-depth and max-items, or their defaults.
 func (t ToolLs) Limits() (depth, items int) {
 	return ptrValOr(t.MaxDepth, 0), ptrValOr(t.MaxItems, 0)
+}
+
+type ToolGrep struct {
+	Timeout *time.Duration `json:"timeout,omitempty" jsonschema:"description=Timeout for the grep tool call,default=5s,example=10s"`
+}
+
+// GetTimeout returns the user-defined timeout or the default.
+func (t ToolGrep) GetTimeout() time.Duration {
+	return ptrValOr(t.Timeout, 5*time.Second)
 }
 
 // Config holds the configuration for crush.
@@ -358,8 +379,9 @@ type Config struct {
 
 	// We currently only support large/small as values here.
 	Models map[SelectedModelType]SelectedModel `json:"models,omitempty" jsonschema:"description=Model configurations for different model types,example={\"large\":{\"model\":\"gpt-4o\",\"provider\":\"openai\"}}"`
+
 	// Recently used models stored in the data directory config.
-	RecentModels map[SelectedModelType][]SelectedModel `json:"recent_models,omitempty" jsonschema:"description=Recently used models sorted by most recent first"`
+	RecentModels map[SelectedModelType][]SelectedModel `json:"recent_models,omitempty" jsonschema:"-"`
 
 	// The providers that are configured
 	Providers *csync.Map[string, ProviderConfig] `json:"providers,omitempty" jsonschema:"description=AI provider configurations"`
@@ -689,6 +711,7 @@ func allToolNames() []string {
 		"multiedit",
 		"lsp_diagnostics",
 		"lsp_references",
+		"lsp_restart",
 		"fetch",
 		"agentic_fetch",
 		"glob",
@@ -698,6 +721,8 @@ func allToolNames() []string {
 		"todos",
 		"view",
 		"write",
+		"list_mcp_resources",
+		"read_mcp_resource",
 	}
 }
 
@@ -716,7 +741,7 @@ func resolveReadOnlyTools(tools []string) []string {
 }
 
 func filterSlice(data []string, mask []string, include bool) []string {
-	filtered := []string{}
+	var filtered []string
 	for _, s := range data {
 		// if include is true, we include items that ARE in the mask
 		// if include is false, we include items that are NOT in the mask
@@ -741,7 +766,7 @@ func (c *Config) SetupAgents() {
 		},
 
 		AgentTask: {
-			ID:           AgentCoder,
+			ID:           AgentTask,
 			Name:         "Task",
 			Description:  "An agent that helps with searching for context and finding implementation details.",
 			Model:        SelectedModelTypeLarge,
@@ -759,42 +784,58 @@ func (c *Config) Resolver() VariableResolver {
 }
 
 func (c *ProviderConfig) TestConnection(resolver VariableResolver) error {
-	testURL := ""
-	headers := make(map[string]string)
-	apiKey, _ := resolver.ResolveValue(c.APIKey)
+	var (
+		providerID = catwalk.InferenceProvider(c.ID)
+		testURL    = ""
+		headers    = make(map[string]string)
+		apiKey, _  = resolver.ResolveValue(c.APIKey)
+	)
+
+	switch providerID {
+	case catwalk.InferenceProviderMiniMax:
+		// NOTE: MiniMax has no good endpoint we can use to validate the API key.
+		// Let's at least check the pattern.
+		if !strings.HasPrefix(apiKey, "sk-") {
+			return fmt.Errorf("invalid API key format for provider %s", c.ID)
+		}
+		return nil
+	}
+
 	switch c.Type {
 	case catwalk.TypeOpenAI, catwalk.TypeOpenAICompat, catwalk.TypeOpenRouter:
 		baseURL, _ := resolver.ResolveValue(c.BaseURL)
-		if baseURL == "" {
-			baseURL = "https://api.openai.com/v1"
-		}
-		if c.ID == string(catwalk.InferenceProviderOpenRouter) {
+		baseURL = cmp.Or(baseURL, "https://api.openai.com/v1")
+
+		switch providerID {
+		case catwalk.InferenceProviderOpenRouter:
 			testURL = baseURL + "/credits"
-		} else {
+		default:
 			testURL = baseURL + "/models"
 		}
+
 		headers["Authorization"] = "Bearer " + apiKey
 	case catwalk.TypeAnthropic:
 		baseURL, _ := resolver.ResolveValue(c.BaseURL)
-		if baseURL == "" {
-			baseURL = "https://api.anthropic.com/v1"
-		}
-		testURL = baseURL + "/models"
-		// TODO: replace with const when catwalk is released
-		if c.ID == "kimi-coding" {
+		baseURL = cmp.Or(baseURL, "https://api.anthropic.com/v1")
+
+		switch providerID {
+		case catwalk.InferenceKimiCoding:
 			testURL = baseURL + "/v1/models"
+		default:
+			testURL = baseURL + "/models"
 		}
+
 		headers["x-api-key"] = apiKey
 		headers["anthropic-version"] = "2023-06-01"
 	case catwalk.TypeGoogle:
 		baseURL, _ := resolver.ResolveValue(c.BaseURL)
-		if baseURL == "" {
-			baseURL = "https://generativelanguage.googleapis.com"
-		}
+		baseURL = cmp.Or(baseURL, "https://generativelanguage.googleapis.com")
 		testURL = baseURL + "/v1beta/models?key=" + url.QueryEscape(apiKey)
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	client := &http.Client{}
 	req, err := http.NewRequestWithContext(ctx, "GET", testURL, nil)
 	if err != nil {
@@ -806,21 +847,23 @@ func (c *ProviderConfig) TestConnection(resolver VariableResolver) error {
 	for k, v := range c.ExtraHeaders {
 		req.Header.Set(k, v)
 	}
-	b, err := client.Do(req)
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to create request for provider %s: %w", c.ID, err)
 	}
-	if c.ID == string(catwalk.InferenceProviderZAI) {
-		if b.StatusCode == http.StatusUnauthorized {
-			// for z.ai just check if the http response is not 401
-			return fmt.Errorf("failed to connect to provider %s: %s", c.ID, b.Status)
+	defer resp.Body.Close()
+
+	switch providerID {
+	case catwalk.InferenceProviderZAI:
+		if resp.StatusCode == http.StatusUnauthorized {
+			return fmt.Errorf("failed to connect to provider %s: %s", c.ID, resp.Status)
 		}
-	} else {
-		if b.StatusCode != http.StatusOK {
-			return fmt.Errorf("failed to connect to provider %s: %s", c.ID, b.Status)
+	default:
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("failed to connect to provider %s: %s", c.ID, resp.Status)
 		}
 	}
-	_ = b.Body.Close()
 	return nil
 }
 
@@ -830,7 +873,7 @@ func resolveEnvs(envs map[string]string) []string {
 		var err error
 		envs[e], err = resolver.ResolveValue(v)
 		if err != nil {
-			slog.Error("error resolving environment variable", "error", err, "variable", e, "value", v)
+			slog.Error("Error resolving environment variable", "error", err, "variable", e, "value", v)
 			continue
 		}
 	}

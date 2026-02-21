@@ -3,6 +3,10 @@
 
 "area: ci":
   - "/^ci: /i"
+"area: crush run":
+  - "/crush run/i"
+  - "/headless/i"
+  - "/non-interactive/i"
 "area: diff":
   - "/diff/i"
 "area: docs":
@@ -53,6 +57,8 @@
   - "/vertex/i"
 "provider: kimi":
   - "/kimi/i"
+"provider: minimax":
+  - "/minimax/i"
 "provider: ollama":
   - "/llama/i"
 "provider: openai chatgpt":

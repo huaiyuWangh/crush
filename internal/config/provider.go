@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/catwalk/pkg/catwalk"
-	"github.com/charmbracelet/catwalk/pkg/embedded"
+	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/pkg/embedded"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/home"
@@ -145,11 +145,15 @@ func Providers(cfg *Config) ([]catwalk.Provider, error) {
 		var errs []error
 		providers := csync.NewSlice[catwalk.Provider]()
 		autoupdate := !cfg.Options.DisableProviderAutoUpdate
+		customProvidersOnly := cfg.Options.DisableDefaultProviders
 
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 
 		wg.Go(func() {
+			if customProvidersOnly {
+				return
+			}
 			catwalkURL := cmp.Or(os.Getenv("CATWALK_URL"), defaultCatwalkURL)
 			client := catwalk.NewWithURL(catwalkURL)
 			path := cachePathFor("providers")
@@ -165,7 +169,7 @@ func Providers(cfg *Config) ([]catwalk.Provider, error) {
 		})
 
 		wg.Go(func() {
-			if !hyper.Enabled() {
+			if customProvidersOnly || !hyper.Enabled() {
 				return
 			}
 			path := cachePathFor("hyper")

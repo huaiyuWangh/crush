@@ -13,7 +13,6 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
-	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/lsp"
@@ -35,13 +34,6 @@ type ViewPermissionsParams struct {
 	Limit    int    `json:"limit"`
 }
 
-type viewTool struct {
-	lspClients  *csync.Map[string, *lsp.Client]
-	workingDir  string
-	permissions permission.Service
-	skillsPaths []string
-}
-
 type ViewResponseMetadata struct {
 	FilePath string `json:"file_path"`
 	Content  string `json:"content"`
@@ -54,7 +46,13 @@ const (
 	MaxLineLength    = 2000
 )
 
-func NewViewTool(lspClients *csync.Map[string, *lsp.Client], permissions permission.Service, workingDir string, skillsPaths ...string) fantasy.AgentTool {
+func NewViewTool(
+	lspManager *lsp.Manager,
+	permissions permission.Service,
+	filetracker filetracker.Service,
+	workingDir string,
+	skillsPaths ...string,
+) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		ViewToolName,
 		string(viewDescription),
@@ -81,14 +79,14 @@ func NewViewTool(lspClients *csync.Map[string, *lsp.Client], permissions permiss
 			isOutsideWorkDir := err != nil || strings.HasPrefix(relPath, "..")
 			isSkillFile := isInSkillsPath(absFilePath, skillsPaths)
 
+			sessionID := GetSessionFromContext(ctx)
+			if sessionID == "" {
+				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for accessing files outside working directory")
+			}
+
 			// Request permission for files outside working directory, unless it's a skill file.
 			if isOutsideWorkDir && !isSkillFile {
-				sessionID := GetSessionFromContext(ctx)
-				if sessionID == "" {
-					return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for accessing files outside working directory")
-				}
-
-				granted := permissions.Request(
+				granted, err := permissions.Request(ctx,
 					permission.CreatePermissionRequest{
 						SessionID:   sessionID,
 						Path:        absFilePath,
@@ -99,7 +97,9 @@ func NewViewTool(lspClients *csync.Map[string, *lsp.Client], permissions permiss
 						Params:      ViewPermissionsParams(params),
 					},
 				)
-
+				if err != nil {
+					return fantasy.ToolResponse{}, err
+				}
 				if !granted {
 					return fantasy.ToolResponse{}, permission.ErrorPermissionDenied
 				}
@@ -175,15 +175,15 @@ func NewViewTool(lspClients *csync.Map[string, *lsp.Client], permissions permiss
 
 			// Read the file content
 			content, lineCount, err := readTextFile(filePath, params.Offset, params.Limit)
+			if err != nil {
+				return fantasy.ToolResponse{}, fmt.Errorf("error reading file: %w", err)
+			}
 			isValidUt8 := utf8.ValidString(content)
 			if !isValidUt8 {
 				return fantasy.NewTextErrorResponse("File content is not valid UTF-8"), nil
 			}
-			if err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("error reading file: %w", err)
-			}
 
-			notifyLSPs(ctx, lspClients, filePath)
+			notifyLSPs(ctx, lspManager, filePath)
 			output := "<file>\n"
 			// Format the output with line numbers
 			output += addLineNumbers(content, params.Offset+1)
@@ -194,8 +194,8 @@ func NewViewTool(lspClients *csync.Map[string, *lsp.Client], permissions permiss
 					params.Offset+len(strings.Split(content, "\n")))
 			}
 			output += "\n</file>\n"
-			output += getDiagnostics(filePath, lspClients)
-			filetracker.RecordRead(filePath)
+			output += getDiagnostics(filePath, lspManager)
+			filetracker.RecordRead(ctx, sessionID, filePath)
 			return fantasy.WithResponseMetadata(
 				fantasy.NewTextResponse(output),
 				ViewResponseMetadata{

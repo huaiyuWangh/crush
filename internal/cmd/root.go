@@ -20,8 +20,8 @@ import (
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/projects"
-	"github.com/charmbracelet/crush/internal/stringext"
-	"github.com/charmbracelet/crush/internal/tui"
+	"github.com/charmbracelet/crush/internal/ui/common"
+	ui "github.com/charmbracelet/crush/internal/ui/model"
 	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/fang"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -46,6 +46,7 @@ func init() {
 		logsCmd,
 		schemaCmd,
 		loginCmd,
+		statsCmd,
 	)
 }
 
@@ -86,14 +87,16 @@ crush -y
 
 		// Set up the TUI.
 		var env uv.Environ = os.Environ()
-		ui := tui.New(app)
-		ui.QueryVersion = shouldQueryTerminalVersion(env)
+
+		com := common.DefaultCommon(app)
+		model := ui.New(com)
 
 		program := tea.NewProgram(
-			ui,
+			model,
 			tea.WithEnvironment(env),
 			tea.WithContext(cmd.Context()),
-			tea.WithFilter(tui.MouseEventFilter)) // Filter mouse events based on focus state
+			tea.WithFilter(ui.MouseEventFilter), // Filter mouse events based on focus state
+		)
 		go app.Subscribe(program)
 
 		if _, err := program.Run(); err != nil {
@@ -102,9 +105,6 @@ crush -y
 			return errors.New("Crush crashed. If metrics are enabled, we were notified about it. If you'd like to report it, please copy the stacktrace above and open an issue at https://github.com/charmbracelet/crush/issues/new?template=bug.yml") //nolint:staticcheck
 		}
 		return nil
-	},
-	PostRun: func(cmd *cobra.Command, args []string) {
-		event.AppExited()
 	},
 }
 
@@ -164,12 +164,19 @@ func supportsProgressBar() bool {
 }
 
 func setupAppWithProgressBar(cmd *cobra.Command) (*app.App, error) {
-	if supportsProgressBar() {
+	app, err := setupApp(cmd)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if progress bar is enabled in config (defaults to true if nil)
+	progressEnabled := app.Config().Options.Progress == nil || *app.Config().Options.Progress
+	if progressEnabled && supportsProgressBar() {
 		_, _ = fmt.Fprintf(os.Stderr, ansi.SetIndeterminateProgressBar)
 		defer func() { _, _ = fmt.Fprintf(os.Stderr, ansi.ResetProgressBar) }()
 	}
 
-	return setupApp(cmd)
+	return app, nil
 }
 
 // setupApp handles the common setup logic for both interactive and non-interactive modes.
@@ -217,21 +224,21 @@ func setupApp(cmd *cobra.Command) (*app.App, error) {
 		return nil, err
 	}
 
-	if shouldEnableMetrics() {
+	if shouldEnableMetrics(cfg) {
 		event.Init()
 	}
 
 	return appInstance, nil
 }
 
-func shouldEnableMetrics() bool {
+func shouldEnableMetrics(cfg *config.Config) bool {
 	if v, _ := strconv.ParseBool(os.Getenv("CRUSH_DISABLE_METRICS")); v {
 		return false
 	}
 	if v, _ := strconv.ParseBool(os.Getenv("DO_NOT_TRACK")); v {
 		return false
 	}
-	if config.Get().Options.DisableMetrics {
+	if cfg.Options.DisableMetrics {
 		return false
 	}
 	return true
@@ -285,14 +292,4 @@ func createDotCrushDir(dir string) error {
 	}
 
 	return nil
-}
-
-func shouldQueryTerminalVersion(env uv.Environ) bool {
-	termType := env.Getenv("TERM")
-	termProg, okTermProg := env.LookupEnv("TERM_PROGRAM")
-	_, okSSHTTY := env.LookupEnv("SSH_TTY")
-	return (!okTermProg && !okSSHTTY) ||
-		(!strings.Contains(termProg, "Apple") && !okSSHTTY) ||
-		// Terminals that do support XTVERSION.
-		stringext.ContainsAny(termType, "alacritty", "ghostty", "kitty", "rio", "wezterm")
 }

@@ -472,9 +472,10 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent) ([]fan
 			}
 			if len(tools) == 0 || slices.Contains(tools, tool.MCPToolName()) {
 				filteredTools = append(filteredTools, tool)
+				break
 			}
+			slog.Debug("MCP not allowed", "tool", tool.Name(), "agent", agent.Name)
 		}
-		slog.Debug("MCP not allowed", "tool", tool.Name(), "agent", agent.Name)
 	}
 	slices.SortFunc(filteredTools, func(a, b fantasy.AgentTool) int {
 		return strings.Compare(a.Info().Name, b.Info().Name)
